@@ -39,6 +39,10 @@ jobs:
           #!/bin/bash
           mkdir -p /usr/local/bin
           ln -sfh "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/dialogcli" /usr/local/bin/dialog
+          logs="/Library/Managed Notifications/logs"
+          /usr/bin/install -d -m 1777 -o root -g wheel "$logs"
+          /bin/chmod 1777 "$logs"
+          /bin/chmod 666 "$logs"/dialog.log* 2>/dev/null || true
           exit 0
           POST
           chmod 755 "$scripts/postinstall"
