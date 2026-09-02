@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from tag
+        id: ver
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Dialog.app (unsigned)
+        run: |
+          xcodebuild -project dialog.xcodeproj -scheme "Dialog App Bundle" -configuration Release \
+            -derivedDataPath ./build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Build unsigned package
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          root="$PWD/pkg/root"; scripts="$PWD/pkg/scripts"
+          rm -rf "$PWD/pkg" artifacts
+          mkdir -p "$root/Library/Application Support/Dialog" "$scripts" artifacts
+          cp -R build/Build/Products/Release/Dialog.app "$root/Library/Application Support/Dialog/Dialog.app"
+          cat > "$scripts/postinstall" <<'POST'
+          #!/bin/bash
+          mkdir -p /usr/local/bin
+          ln -sfh "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/dialogcli" /usr/local/bin/dialog
+          exit 0
+          POST
+          chmod 755 "$scripts/postinstall"
+          pkgbuild --root "$root" --scripts "$scripts" --identifier au.csiro.dialogcli --version "$VERSION" \
+            --install-location / "artifacts/SwiftDialog-component.pkg"
+          productbuild --package "artifacts/SwiftDialog-component.pkg" --identifier au.csiro.dialogcli \
+            --version "$VERSION" "artifacts/SwiftDialog-${VERSION}.pkg"
+          rm -f artifacts/SwiftDialog-component.pkg
+          shasum -a 256 "artifacts/SwiftDialog-${VERSION}.pkg" > "artifacts/SwiftDialog-${VERSION}.pkg.sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: swiftDialog ${{ steps.ver.outputs.VERSION }}
+          body: Unsigned package built from this tag. Sign and notarize it with your own Developer ID before deployment.
+          files: |
+            artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg
+            artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg.sha256
