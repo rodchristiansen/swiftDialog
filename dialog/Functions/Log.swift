@@ -50,7 +50,7 @@ extension OSLogType {
 //
 // Beside the unified log, every record is appended to a file in the
 // management-tool logging convention so fleet tooling can collect it:
-// "/Library/Managed Notifications/logs/dialog.log" whenever that shared
+// "/Library/Managed Notifications/logs/<yyyy-MM-dd>/dialog.log" whenever that shared
 // directory is writable by this process. The installer creates it root:wheel
 // mode 1777 (world-writable, sticky) so root and user contexts append to the
 // same file, and a root-context run creates it that way if it is missing.
@@ -68,7 +68,13 @@ private let managedLogQueue = DispatchQueue(label: "au.csiro.dialog.managedlog")
 private let managedLogMaxBytes: off_t = 5 * 1024 * 1024
 private let managedLogGenerations = 5
 private let managedLogSharedDirectory = "/Library/Managed Notifications/logs"
-private let managedLogSharedPath = managedLogSharedDirectory + "/dialog.log"
+/// The day directory is this tool's session: a dialog is shown far too often to
+/// justify a directory per invocation, so records land in
+/// <shared>/<yyyy-MM-dd>/dialog.log with events.jsonl beside them.
+private let managedLogEventsFileName = "events.jsonl"
+private let managedLogRetentionDays = 30
+private let managedLogInvocation = UUID().uuidString
+private var managedLogPruned = false // only touched on managedLogQueue
 private let managedLogUserPath = NSHomeDirectory() + "/Library/Logs/dialog.log"
 private let managedLogSharedDirectoryMode: mode_t = 0o1777
 private let managedLogFileMode: mode_t = 0o666
@@ -80,6 +86,77 @@ private let managedLogStamp: DateFormatter = {
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     return formatter
 }()
+
+private let managedLogDayStamp: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
+}()
+
+private let managedLogEventStamp: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
+/// The log for `date`, day-nested inside the shared root. Resolved per record so
+/// a dialog left open across midnight rolls onto the new day directory.
+private func managedLogSharedPath(_ date: Date) -> String {
+    return managedLogSharedDirectory + "/" + managedLogDayStamp.string(from: date) + "/dialog.log"
+}
+
+/// Creates a day directory inside the shared root world-writable and sticky like
+/// the root itself, by whichever context gets there first, so every context can
+/// write its own records into it.
+private func ensureManagedLogDayDirectory(_ path: String) {
+    var info = stat()
+    if stat(path, &info) == 0 {
+        if (info.st_mode & S_IFMT) == S_IFDIR, (info.st_mode & 0o7777) != managedLogSharedDirectoryMode,
+           info.st_uid == geteuid() {
+            chmod(path, managedLogSharedDirectoryMode)
+        }
+        return
+    }
+    if mkdir(path, managedLogSharedDirectoryMode) == 0 {
+        chmod(path, managedLogSharedDirectoryMode)
+        if managedLogIsRoot() { chown(path, 0, 0) }
+    }
+}
+
+/// Removes day directories past the retention window, once per process.
+/// Best-effort: another context's directory is not this process's to remove.
+private func pruneManagedLogDays(now: Date = Date()) {
+    guard !managedLogPruned else { return }
+    managedLogPruned = true
+    let fm = FileManager.default
+    guard let entries = try? fm.contentsOfDirectory(atPath: managedLogSharedDirectory),
+          let cutoff = Calendar.current.date(byAdding: .day, value: -managedLogRetentionDays, to: now) else { return }
+    for entry in entries {
+        guard let day = managedLogDayStamp.date(from: entry), day < cutoff else { continue }
+        let full = managedLogSharedDirectory + "/" + entry
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: full, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+        try? fm.removeItem(atPath: full)
+    }
+}
+
+/// One events.jsonl record: the same entry, structured. Several tools share a
+/// day directory, so each record names its tool, process and invocation.
+private func managedLogEvent(_ message: String, level: String, date: Date) -> String {
+    let record: [String: String] = [
+        "timestamp": managedLogEventStamp.string(from: date),
+        "level": level,
+        "event_type": level == "ERROR" ? "error" : "message",
+        "tool": "dialog",
+        "pid": String(getpid()),
+        "invocation_id": managedLogInvocation,
+        "message": message
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+          let line = String(data: data, encoding: .utf8) else { return "" }
+    return line + "\n"
+}
 
 private func managedLogIsRoot() -> Bool {
     return geteuid() == 0
@@ -121,9 +198,12 @@ private func managedLogLevel(_ type: OSLogType) -> String {
 }
 
 func writeManagedLog(_ message: String, logLevel: OSLogType) {
-    let level = managedLogLevel(logLevel).padding(toLength: 5, withPad: " ", startingAt: 0)
-    let record = "[\(managedLogStamp.string(from: Date()))] \(level) \(message)\n"
-    managedLogQueue.async { appendManagedLog(record) }
+    let now = Date()
+    let name = managedLogLevel(logLevel)
+    let level = name.padding(toLength: 5, withPad: " ", startingAt: 0)
+    let record = "[\(managedLogStamp.string(from: now))] \(level) \(message)\n"
+    let event = managedLogEvent(message, level: name, date: now)
+    managedLogQueue.async { appendManagedLog(record, event: event, date: now) }
 }
 
 /// Opens `path` for appending without following a symlink, refuses anything
@@ -162,7 +242,10 @@ private func rollManagedLog(_ path: String, _ descriptor: Int32) -> Bool {
 
 private func appendManagedLog(_ record: String, to path: String) -> Bool {
     let directory = (path as NSString).deletingLastPathComponent
-    if directory != managedLogSharedDirectory, !FileManager.default.fileExists(atPath: directory) {
+    if (directory as NSString).deletingLastPathComponent == managedLogSharedDirectory {
+        ensureManagedLogDayDirectory(directory)
+        pruneManagedLogDays()
+    } else if directory != managedLogSharedDirectory, !FileManager.default.fileExists(atPath: directory) {
         try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o755])
     }
@@ -186,9 +269,14 @@ private func appendManagedLog(_ record: String, to path: String) -> Bool {
     return true
 }
 
-private func appendManagedLog(_ record: String) {
-    if !managedLogFellBack, managedLogSharedDirectoryIsWritable(), appendManagedLog(record, to: managedLogSharedPath) {
-        return
+private func appendManagedLog(_ record: String, event: String, date: Date) {
+    if !managedLogFellBack, managedLogSharedDirectoryIsWritable() {
+        let path = managedLogSharedPath(date)
+        if appendManagedLog(record, to: path) {
+            let events = (path as NSString).deletingLastPathComponent + "/" + managedLogEventsFileName
+            if !event.isEmpty { _ = appendManagedLog(event, to: events) }
+            return
+        }
     }
     managedLogFellBack = true
     _ = appendManagedLog(record, to: managedLogUserPath)
