@@ -96,12 +96,43 @@ final class ManagedLogDirectoryTests: XCTestCase {
         let dir = root.appendingPathComponent(managedLogUntrustedName(day: "2026-07-02", pid: 2, now: old)).path
         let recent = managedLogUntrustedName(day: "2026-09-21", pid: 3, now: now)
         try fm.createSymbolicLink(atPath: link, withDestinationPath: target)
-        try fm.createDirectory(atPath: dir + "/inner", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: false)
+        fm.createFile(atPath: dir + "/dialog.log", contents: Data("x".utf8))
         try fm.createDirectory(atPath: root.appendingPathComponent(recent).path, withIntermediateDirectories: false)
 
         pruneManagedLogEntries(in: root.path, now: now)
 
         XCTAssertEqual(Set(try fm.contentsOfDirectory(atPath: root.path)), ["target", recent])
         XCTAssertTrue(fm.fileExists(atPath: target + "/keep"))
+    }
+
+    func testRetentionUnlinksALinkInsideAnExpiredDayAndItsTargetSurvives() throws {
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let target = root.appendingPathComponent("target").path
+        try fm.createDirectory(atPath: target, withIntermediateDirectories: false)
+        fm.createFile(atPath: target + "/keep", contents: Data("x".utf8))
+        let day = root.appendingPathComponent("2026-07-01").path
+        try fm.createDirectory(atPath: day, withIntermediateDirectories: false)
+        fm.createFile(atPath: day + "/dialog.log", contents: Data("x".utf8))
+        try fm.createSymbolicLink(atPath: day + "/link", withDestinationPath: target)
+
+        pruneManagedLogEntries(in: root.path, now: now)
+
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: root.path), ["target"])
+        XCTAssertTrue(fm.fileExists(atPath: target + "/keep"))
+    }
+
+    func testRetentionLeavesAFolderNestedInsideAnExpiredDay() throws {
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let day = root.appendingPathComponent("2026-07-01").path
+        try fm.createDirectory(atPath: day + "/nested", withIntermediateDirectories: true)
+        fm.createFile(atPath: day + "/dialog.log", contents: Data("x".utf8))
+
+        pruneManagedLogEntries(in: root.path, now: now)
+
+        XCTAssertTrue(fm.fileExists(atPath: day + "/nested"))
+        XCTAssertFalse(fm.fileExists(atPath: day + "/dialog.log"))
     }
 }

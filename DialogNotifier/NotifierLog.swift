@@ -157,16 +157,43 @@ func managedLogUntrustedDate(_ name: String) -> Date? {
     return Date(timeIntervalSince1970: TimeInterval(epoch))
 }
 
-/// Removes `path` without following it: a link or file is unlinked, a real
-/// directory removed with its contents.
-private func removeManagedLogEntry(_ path: String) {
-    var info = stat()
-    guard lstat(path, &info) == 0 else { return }
-    if (info.st_mode & S_IFMT) == S_IFDIR {
-        try? FileManager.default.removeItem(atPath: path)
-    } else {
-        unlink(path)
+/// Names in the directory open at `fd`, without "." and "..".
+func managedLogEntryNames(_ fd: Int32) -> [String] {
+    let copy = dup(fd)
+    guard copy >= 0 else { return [] }
+    guard let dir = fdopendir(copy) else { close(copy); return [] }
+    defer { closedir(dir) }
+    rewinddir(dir)
+    var names: [String] = []
+    while let entry = readdir(dir) {
+        let name = withUnsafeBytes(of: entry.pointee.d_name) { bytes in
+            String(cString: bytes.bindMemory(to: CChar.self).baseAddress!)
+        }
+        if name != "." && name != ".." { names.append(name) }
     }
+    return names
+}
+
+private func managedLogEntryIsDirectory(_ name: String, in fd: Int32) -> Bool {
+    var info = stat()
+    return fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
+}
+
+/// Removes `name` from the directory open at `parent` without following a
+/// link. A link or file is unlinked. A directory is opened with O_NOFOLLOW,
+/// its files and links unlinked, and it is removed only once it is empty; a
+/// folder nested inside it is left in place.
+private func removeManagedLogEntry(_ name: String, in parent: Int32) {
+    var info = stat()
+    guard fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { return }
+    guard (info.st_mode & S_IFMT) == S_IFDIR else { unlinkat(parent, name, 0); return }
+    let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard fd >= 0 else { return }
+    for child in managedLogEntryNames(fd) where !managedLogEntryIsDirectory(child, in: fd) {
+        unlinkat(fd, child, 0)
+    }
+    close(fd)
+    unlinkat(parent, name, AT_REMOVEDIR)
 }
 
 /// Removes day directories past the retention window, once per process.
@@ -180,18 +207,18 @@ private func pruneManagedLogDays(now: Date = Date()) {
 /// window. Best-effort: another context's directory is not this process's to
 /// remove.
 func pruneManagedLogEntries(in directory: String, now: Date) {
-    let fm = FileManager.default
-    guard let entries = try? fm.contentsOfDirectory(atPath: directory),
-          let cutoff = Calendar.current.date(byAdding: .day, value: -managedLogRetentionDays, to: now) else { return }
-    for entry in entries {
-        let full = directory + "/" + entry
+    guard let cutoff = Calendar.current.date(byAdding: .day, value: -managedLogRetentionDays, to: now) else { return }
+    let root = open(directory, O_RDONLY | O_DIRECTORY)
+    guard root >= 0 else { return }
+    defer { close(root) }
+    for entry in managedLogEntryNames(root) {
         if let setAsideAt = managedLogUntrustedDate(entry) {
-            if setAsideAt < cutoff { removeManagedLogEntry(full) }
+            if setAsideAt < cutoff { removeManagedLogEntry(entry, in: root) }
             continue
         }
         guard let day = managedLogDayStamp.date(from: entry), day < cutoff else { continue }
-        guard managedLogDirectoryIsTrusted(full) else { continue }
-        try? fm.removeItem(atPath: full)
+        guard managedLogDirectoryIsTrusted(directory + "/" + entry) else { continue }
+        removeManagedLogEntry(entry, in: root)
     }
 }
 
@@ -286,14 +313,12 @@ private func rollManagedLog(_ path: String, _ descriptor: Int32) -> Bool {
     var info = stat()
     guard fstat(descriptor, &info) == 0, info.st_size >= managedLogMaxBytes,
           managedLogIsRoot() || info.st_uid == geteuid() else { return false }
-    let fm = FileManager.default
-    let oldest = "\(path).\(managedLogGenerations)"
-    if fm.fileExists(atPath: oldest) { try? fm.removeItem(atPath: oldest) }
+    // unlink and rename never follow a link, and unlink refuses a directory.
+    unlink("\(path).\(managedLogGenerations)")
     for index in stride(from: managedLogGenerations - 1, through: 1, by: -1) {
-        let from = "\(path).\(index)", to = "\(path).\(index + 1)"
-        if fm.fileExists(atPath: from) { try? fm.moveItem(atPath: from, toPath: to) }
+        rename("\(path).\(index)", "\(path).\(index + 1)")
     }
-    try? fm.moveItem(atPath: path, toPath: "\(path).1")
+    rename(path, "\(path).1")
     return true
 }
 
