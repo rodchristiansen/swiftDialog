@@ -1172,9 +1172,11 @@ struct SDHelp {
         swiftDialog will check the au.csiro.dialog domain for the key name \"AuthorisationKey\"
         The key value should be a SHA256 hash of a secret keyphrase
         If this value is present, then it must match or swiftDialog will not launch.
+        The key is only honoured when it is delivered by a configuration profile (a managed
+        preference). A value set with `defaults write` is ignored.
 
-        e.g. if the secret phrase to be used is \"password\" then the store the SHA256 hash of this
-        phrase in the au.csiro.dialog domain:
+        e.g. if the secret phrase to be used is \"password\" then deliver the SHA256 hash of this
+        phrase in a configuration profile for the au.csiro.dialog domain:
           \"AuthorisationKey\" = \"5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8\"
         launch dialog and specify the secret phrase:
           dialog --\(argument.authkey.long) \"password\"

@@ -22,12 +22,13 @@ struct SolidColourView: View {
         Color(argument: colourValue.components(separatedBy: "=").last ?? "clear")
             .ignoresSafeArea(.all)
             .overlay(
-                LinearGradient(
+                // Explicitly a View: LinearGradient is also a ShapeStyle, which makes .opacity ambiguous on newer SDKs.
+                AnyView(LinearGradient(
                     stops: [
                         Gradient.Stop(color: .white, location: 0.10),
                         Gradient.Stop(color: colourComponent, location: 0.40),
                         Gradient.Stop(color: .black, location: 0.95)
-                    ], startPoint: .top, endPoint: .bottom)
+                    ], startPoint: .top, endPoint: .bottom))
                 .opacity(withGradient ? 0.15 : 0)
             )
     }
