@@ -117,11 +117,14 @@ func managedLogDirectoryIsTrusted(_ path: String) -> Bool {
 /// Creates a day directory inside the shared root world-writable and sticky like
 /// the root itself, by whichever context gets there first, so every context can
 /// write its own records into it. An existing entry is never followed or
-/// re-moded; it is used only when it is a trusted directory.
+/// re-moded; it is used only when it is a trusted directory. Root sets aside
+/// anything else under the day's name and makes its own, so root records stay
+/// in the collected location.
 func ensureManagedLogDayDirectory(_ path: String) -> Bool {
     var info = stat()
     if lstat(path, &info) == 0 {
-        return managedLogDirectoryIsTrusted(path)
+        if managedLogDirectoryIsTrusted(path) { return true }
+        guard managedLogIsRoot(), setAsideManagedLogEntry(path) else { return false }
     }
     guard mkdir(path, managedLogSharedDirectoryMode) == 0 else { return false }
     // The sticky root stops other accounts renaming what this process just made.
@@ -130,17 +133,64 @@ func ensureManagedLogDayDirectory(_ path: String) -> Bool {
     return true
 }
 
+/// Renames `path` to a hidden name beside it. rename never follows a link, and
+/// root may rename any entry in a root-owned parent. Only done when the parent
+/// is a real directory owned by root.
+func setAsideManagedLogEntry(_ path: String, now: Date = Date()) -> Bool {
+    let parent = (path as NSString).deletingLastPathComponent
+    var info = stat()
+    guard lstat(parent, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == 0 else { return false }
+    let name = managedLogUntrustedName(day: (path as NSString).lastPathComponent, pid: getpid(), now: now)
+    return rename(path, (parent as NSString).appendingPathComponent(name)) == 0
+}
+
+let managedLogUntrustedPrefix = ".untrusted-"
+
+/// The hidden name an entry set aside by `setAsideManagedLogEntry` gets.
+func managedLogUntrustedName(day: String, pid: Int32, now: Date) -> String {
+    return "\(managedLogUntrustedPrefix)\(day)-\(pid)-\(Int(now.timeIntervalSince1970))"
+}
+
+/// When an entry named by `managedLogUntrustedName` was set aside, or nil for any other name.
+func managedLogUntrustedDate(_ name: String) -> Date? {
+    guard name.hasPrefix(managedLogUntrustedPrefix), let last = name.split(separator: "-").last,
+          let epoch = Int(last) else { return nil }
+    return Date(timeIntervalSince1970: TimeInterval(epoch))
+}
+
+/// Removes `path` without following it: a link or file is unlinked, a real
+/// directory removed with its contents.
+private func removeManagedLogEntry(_ path: String) {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return }
+    if (info.st_mode & S_IFMT) == S_IFDIR {
+        try? FileManager.default.removeItem(atPath: path)
+    } else {
+        unlink(path)
+    }
+}
+
 /// Removes day directories past the retention window, once per process.
-/// Best-effort: another context's directory is not this process's to remove.
 private func pruneManagedLogDays(now: Date = Date()) {
     guard !managedLogPruned else { return }
     managedLogPruned = true
+    pruneManagedLogEntries(in: managedLogSharedDirectory, now: now)
+}
+
+/// Removes day directories, and entries set aside by root, past the retention
+/// window. Best-effort: another context's directory is not this process's to
+/// remove.
+func pruneManagedLogEntries(in directory: String, now: Date) {
     let fm = FileManager.default
-    guard let entries = try? fm.contentsOfDirectory(atPath: managedLogSharedDirectory),
+    guard let entries = try? fm.contentsOfDirectory(atPath: directory),
           let cutoff = Calendar.current.date(byAdding: .day, value: -managedLogRetentionDays, to: now) else { return }
     for entry in entries {
+        let full = directory + "/" + entry
+        if let setAsideAt = managedLogUntrustedDate(entry) {
+            if setAsideAt < cutoff { removeManagedLogEntry(full) }
+            continue
+        }
         guard let day = managedLogDayStamp.date(from: entry), day < cutoff else { continue }
-        let full = managedLogSharedDirectory + "/" + entry
         guard managedLogDirectoryIsTrusted(full) else { continue }
         try? fm.removeItem(atPath: full)
     }
