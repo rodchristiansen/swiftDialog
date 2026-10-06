@@ -53,6 +53,18 @@ jobs:
           rm -f artifacts/SwiftDialog-component.pkg
           shasum -a 256 "artifacts/SwiftDialog-${VERSION}.pkg" > "artifacts/SwiftDialog-${VERSION}.pkg.sha256"
 
+      - name: Build Managed Notifications Dialog package (unsigned)
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        working-directory: ManagedNotificationsDialog
+        run: |
+          set -euo pipefail
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then export DEVELOPER_DIR="$XCODE/Contents/Developer"; fi
+          make pkg VERSION="$VERSION"
+          cp "build/ManagedNotificationsDialog-${VERSION}.pkg" ../artifacts/
+          (cd ../artifacts && shasum -a 256 "ManagedNotificationsDialog-${VERSION}.pkg" > "ManagedNotificationsDialog-${VERSION}.pkg.sha256")
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -61,3 +73,5 @@ jobs:
           files: |
             artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg
             artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg.sha256
+            artifacts/ManagedNotificationsDialog-${{ steps.ver.outputs.VERSION }}.pkg
+            artifacts/ManagedNotificationsDialog-${{ steps.ver.outputs.VERSION }}.pkg.sha256

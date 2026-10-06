@@ -1,0 +1,8 @@
+#!/bin/zsh --no-rcs
+# Managed Notifications Dialog postinstall
+# Registers the app with Launch Services. The app has no helper and leaves
+# dialog, Dialog.app and its log folder alone.
+
+APP_PATH="${3%/}/Applications/Utilities/Managed Notifications Dialog.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}" 2>/dev/null
+exit 0
