@@ -106,22 +106,28 @@ private func managedLogSharedPath(_ date: Date) -> String {
     return managedLogSharedDirectory + "/" + managedLogDayStamp.string(from: date) + "/dialog.log"
 }
 
+/// True when `path` is a real directory, not a symlink, owned by root or by
+/// this process.
+func managedLogDirectoryIsTrusted(_ path: String) -> Bool {
+    var info = stat()
+    guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+    return info.st_uid == 0 || info.st_uid == geteuid()
+}
+
 /// Creates a day directory inside the shared root world-writable and sticky like
 /// the root itself, by whichever context gets there first, so every context can
-/// write its own records into it.
-private func ensureManagedLogDayDirectory(_ path: String) {
+/// write its own records into it. An existing entry is never followed or
+/// re-moded; it is used only when it is a trusted directory.
+func ensureManagedLogDayDirectory(_ path: String) -> Bool {
     var info = stat()
-    if stat(path, &info) == 0 {
-        if (info.st_mode & S_IFMT) == S_IFDIR, (info.st_mode & 0o7777) != managedLogSharedDirectoryMode,
-           info.st_uid == geteuid() {
-            chmod(path, managedLogSharedDirectoryMode)
-        }
-        return
+    if lstat(path, &info) == 0 {
+        return managedLogDirectoryIsTrusted(path)
     }
-    if mkdir(path, managedLogSharedDirectoryMode) == 0 {
-        chmod(path, managedLogSharedDirectoryMode)
-        if managedLogIsRoot() { chown(path, 0, 0) }
-    }
+    guard mkdir(path, managedLogSharedDirectoryMode) == 0 else { return false }
+    // The sticky root stops other accounts renaming what this process just made.
+    chmod(path, managedLogSharedDirectoryMode)
+    if managedLogIsRoot() { chown(path, 0, 0) }
+    return true
 }
 
 /// Removes day directories past the retention window, once per process.
@@ -135,8 +141,7 @@ private func pruneManagedLogDays(now: Date = Date()) {
     for entry in entries {
         guard let day = managedLogDayStamp.date(from: entry), day < cutoff else { continue }
         let full = managedLogSharedDirectory + "/" + entry
-        var isDirectory: ObjCBool = false
-        guard fm.fileExists(atPath: full, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+        guard managedLogDirectoryIsTrusted(full) else { continue }
         try? fm.removeItem(atPath: full)
     }
 }
@@ -163,12 +168,14 @@ private func managedLogIsRoot() -> Bool {
 }
 
 /// Creates the shared directory root:wheel mode 1777 when missing, and
-/// restores that mode if it drifted. Root only; a no-op otherwise.
+/// restores that mode if it drifted on a root-owned directory. Root only; a
+/// no-op otherwise.
 private func ensureManagedLogSharedDirectory() {
     guard managedLogIsRoot() else { return }
     var info = stat()
-    if stat(managedLogSharedDirectory, &info) == 0 {
-        if (info.st_mode & S_IFMT) == S_IFDIR, (info.st_mode & 0o7777) != managedLogSharedDirectoryMode {
+    if lstat(managedLogSharedDirectory, &info) == 0 {
+        if (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == 0,
+           (info.st_mode & 0o7777) != managedLogSharedDirectoryMode {
             chmod(managedLogSharedDirectory, managedLogSharedDirectoryMode)
         }
         return
@@ -185,7 +192,8 @@ private func ensureManagedLogSharedDirectory() {
 private func managedLogSharedDirectoryIsWritable() -> Bool {
     ensureManagedLogSharedDirectory()
     var info = stat()
-    guard stat(managedLogSharedDirectory, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+    guard lstat(managedLogSharedDirectory, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+          info.st_uid == 0 else { return false }
     return access(managedLogSharedDirectory, W_OK | X_OK) == 0
 }
 
@@ -243,7 +251,7 @@ private func rollManagedLog(_ path: String, _ descriptor: Int32) -> Bool {
 private func appendManagedLog(_ record: String, to path: String) -> Bool {
     let directory = (path as NSString).deletingLastPathComponent
     if (directory as NSString).deletingLastPathComponent == managedLogSharedDirectory {
-        ensureManagedLogDayDirectory(directory)
+        guard ensureManagedLogDayDirectory(directory) else { return false }
         pruneManagedLogDays()
     } else if directory != managedLogSharedDirectory, !FileManager.default.fileExists(atPath: directory) {
         try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
