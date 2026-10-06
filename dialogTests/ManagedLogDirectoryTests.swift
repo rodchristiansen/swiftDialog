@@ -49,14 +49,59 @@ final class ManagedLogDirectoryTests: XCTestCase {
                                                 attributes: [.posixPermissions: 0o700])
         let day = root.appendingPathComponent("2026-10-06").path
         try FileManager.default.createSymbolicLink(atPath: day, withDestinationPath: target)
-        XCTAssertFalse(ensureManagedLogDayDirectory(day))
-        XCTAssertFalse(managedLogDirectoryIsTrusted(day))
+        // Root sets the entry aside and makes its own day; any other account stays off it.
+        XCTAssertEqual(ensureManagedLogDayDirectory(day), geteuid() == 0)
+        XCTAssertEqual(managedLogDirectoryIsTrusted(day), geteuid() == 0)
         XCTAssertEqual(mode(target), 0o700)
     }
 
     func testPlainFileUnderTheDayNameIsRefused() throws {
         let day = root.appendingPathComponent("2026-10-06").path
         XCTAssertTrue(FileManager.default.createFile(atPath: day, contents: Data()))
-        XCTAssertFalse(ensureManagedLogDayDirectory(day))
+        XCTAssertEqual(ensureManagedLogDayDirectory(day), geteuid() == 0)
+    }
+
+    func testSetAsideNameCarriesTheTimeItWasSetAside() {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let name = managedLogUntrustedName(day: "2026-10-06", pid: 42, now: now)
+        XCTAssertEqual(name, ".untrusted-2026-10-06-42-1790000000")
+        XCTAssertEqual(managedLogUntrustedDate(name), now)
+        XCTAssertNil(managedLogUntrustedDate("2026-10-06"))
+        XCTAssertNil(managedLogUntrustedDate(".untrusted-junk"))
+    }
+
+    func testRootSetsAsideADayDirectoryItDoesNotOwn() throws {
+        try XCTSkipUnless(geteuid() == 0, "needs root")
+        let day = root.appendingPathComponent("2026-10-06").path
+        try FileManager.default.createDirectory(atPath: day, withIntermediateDirectories: false)
+        chown(day, 4_294_967_294, 4_294_967_294)
+
+        XCTAssertTrue(ensureManagedLogDayDirectory(day))
+        var info = stat()
+        XCTAssertEqual(lstat(day, &info), 0)
+        XCTAssertEqual(info.st_uid, 0)
+        XCTAssertEqual(mode(day), 0o1777)
+        let entries = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(entries.filter { $0.hasPrefix(managedLogUntrustedPrefix) }.count, 1)
+    }
+
+    func testRetentionRemovesSetAsideEntriesWithoutFollowingThem() throws {
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let old = now.addingTimeInterval(-60 * 24 * 60 * 60)
+        let target = root.appendingPathComponent("target").path
+        try fm.createDirectory(atPath: target, withIntermediateDirectories: false)
+        fm.createFile(atPath: target + "/keep", contents: Data("x".utf8))
+        let link = root.appendingPathComponent(managedLogUntrustedName(day: "2026-07-01", pid: 1, now: old)).path
+        let dir = root.appendingPathComponent(managedLogUntrustedName(day: "2026-07-02", pid: 2, now: old)).path
+        let recent = managedLogUntrustedName(day: "2026-09-21", pid: 3, now: now)
+        try fm.createSymbolicLink(atPath: link, withDestinationPath: target)
+        try fm.createDirectory(atPath: dir + "/inner", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: root.appendingPathComponent(recent).path, withIntermediateDirectories: false)
+
+        pruneManagedLogEntries(in: root.path, now: now)
+
+        XCTAssertEqual(Set(try fm.contentsOfDirectory(atPath: root.path)), ["target", recent])
+        XCTAssertTrue(fm.fileExists(atPath: target + "/keep"))
     }
 }
