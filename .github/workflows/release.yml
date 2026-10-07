@@ -19,12 +19,24 @@ jobs:
         id: ver
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # Info.plist pins CFBundleVersion to a fixed build number below upstream's,
+      # so the installer would skip this Dialog.app on a Mac that already has an
+      # upstream build. The tag's digits (2026.10.06.1522 -> 202610061522) give a
+      # build number that is higher than any upstream build and always increases.
       - name: Build Dialog.app (unsigned)
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
         run: |
+          set -euo pipefail
           xcodebuild -project dialog.xcodeproj -scheme "Dialog App Bundle" -configuration Release \
             -derivedDataPath ./build \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             build
+          build_number="${VERSION//[^0-9]/}"
+          [ -n "$build_number" ] || { echo "Run this from a version tag such as v2026.10.06.1522"; exit 1; }
+          plist=build/Build/Products/Release/Dialog.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" | grep -qx "$build_number"
 
       - name: Build unsigned package
         env:
@@ -46,7 +58,16 @@ jobs:
           exit 0
           POST
           chmod 755 "$scripts/postinstall"
-          pkgbuild --root "$root" --scripts "$scripts" --identifier au.csiro.dialogcli --version "$VERSION" \
+          # Install the app even over a newer bundle, so a rollback also lands.
+          pkgbuild --analyze --root "$root" "$PWD/pkg/component.plist"
+          i=0
+          while plutil -extract "$i" xml1 -o /dev/null "$PWD/pkg/component.plist" 2>/dev/null; do
+            plutil -replace "$i.BundleIsVersionChecked" -bool NO "$PWD/pkg/component.plist"
+            plutil -replace "$i.BundleIsRelocatable" -bool NO "$PWD/pkg/component.plist"
+            i=$((i + 1))
+          done
+          pkgbuild --root "$root" --component-plist "$PWD/pkg/component.plist" --scripts "$scripts" \
+            --identifier au.csiro.dialogcli --version "$VERSION" \
             --install-location / "artifacts/SwiftDialog-component.pkg"
           productbuild --package "artifacts/SwiftDialog-component.pkg" --identifier au.csiro.dialogcli \
             --version "$VERSION" "artifacts/SwiftDialog-${VERSION}.pkg"
