@@ -663,3 +663,45 @@ final class InspectIntakePipelineTests: XCTestCase {
         }
     }
 }
+
+final class AuthorisationKeyTests: XCTestCase {
+
+    func testUnmanagedKeyIsIgnored() {
+        let key = managedAuthorisationKey(isForced: { _ in false },
+                                          value: { _ in "user-set" })
+        XCTAssertEqual(key, "")
+    }
+
+    func testManagedKeyIsHonoured() {
+        let key = managedAuthorisationKey(isForced: { $0 == "AuthorisationKey" },
+                                          value: { $0 == "AuthorisationKey" ? "managed" : nil })
+        XCTAssertEqual(key, "managed")
+    }
+
+    func testManagedAlternateNameWinsOverUnmanagedPrimary() {
+        let key = managedAuthorisationKey(isForced: { $0 == "AuthKey" },
+                                          value: { $0 == "AuthKey" ? "managed" : "user-set" })
+        XCTAssertEqual(key, "managed")
+    }
+
+    func testPrimaryNameTakesPrecedenceWhenSeveralAreManaged() {
+        let key = managedAuthorisationKey(isForced: { _ in true },
+                                          value: { $0 })
+        XCTAssertEqual(key, "AuthorisationKey")
+    }
+
+    func testEmptyManagedValueFallsThrough() {
+        let key = managedAuthorisationKey(isForced: { _ in true },
+                                          value: { $0 == "AuthorisationKey" ? "" : ($0 == "Key" ? "last" : nil) })
+        XCTAssertEqual(key, "last")
+    }
+
+    func testNoStoredKeyAcceptsAnyKey() {
+        XCTAssertTrue(authorisationKeyMatches(key: "anything", storedKey: ""))
+    }
+
+    func testStoredKeyRequiresMatch() {
+        XCTAssertTrue(authorisationKeyMatches(key: "abc", storedKey: "abc"))
+        XCTAssertFalse(authorisationKeyMatches(key: "xyz", storedKey: "abc"))
+    }
+}
