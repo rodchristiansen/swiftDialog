@@ -25,10 +25,17 @@ APP_IDENTIFIER = au.csiro.dialog.gui
 
 # The output path differs between toolchains, so ask SwiftPM for it.
 SWIFT_BUILD_DIR = $(shell swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
-ICON_SOURCE = ../dialog/Assets.xcassets/AppIcon.appiconset
-ICONSET = $(BUILD_DIR)/ManagedNotificationsDialog.iconset
 
-.PHONY: all build test app verify clean
+# The app icon is an Icon Composer bundle. actool compiles it into Assets.car,
+# which holds the macOS 26 icon with its light and dark appearances, and a
+# composited .icns for older macOS. An actool older than Xcode 27's drops the
+# appearance stacks without an error, so the build finds Xcode 27 and refuses
+# to go on without it. Set XCODE_27 to the Xcode app to use a specific one.
+ICON_NAME = ManagedNotificationsDialog
+ICON_SOURCE = Resources/$(ICON_NAME).icon
+ICON_BUILD_DIR = $(BUILD_DIR)/actool-out
+
+.PHONY: all build test icon app verify clean
 
 all: app
 
@@ -46,9 +53,38 @@ build:
 test:
 	swift test
 
+icon:
+	@set -e; dev=""; \
+	for xc in "$(XCODE_27)" /Applications/Xcode_27.app /Applications/Xcode_27.*.app \
+		"$$(xcode-select -p 2>/dev/null | sed 's|/Contents/Developer$$||')" /Applications/Xcode.app; do \
+		[ -n "$$xc" ] && [ -d "$$xc/Contents/Developer" ] || continue; \
+		ver=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$$xc/Contents/Info.plist" 2>/dev/null || true); \
+		if [ "$${ver%%.*}" -ge 27 ] 2>/dev/null; then dev="$$xc/Contents/Developer"; break; fi; \
+	done; \
+	if [ -z "$$dev" ]; then \
+		echo "error: the app icon needs actool from Xcode 27 or later; none found." >&2; \
+		echo "Install Xcode 27, select it with xcode-select, or set XCODE_27=/path/to/Xcode.app." >&2; \
+		exit 1; \
+	fi; \
+	[ -d "$(ICON_SOURCE)" ] || { echo "error: icon bundle not found at $(ICON_SOURCE)" >&2; exit 1; }; \
+	rm -rf "$(ICON_BUILD_DIR)"; mkdir -p "$(ICON_BUILD_DIR)" "$(APP_CONTENTS)/Resources"; \
+	echo "Compiling $(ICON_SOURCE) with actool from $$dev"; \
+	DEVELOPER_DIR="$$dev" xcrun actool \
+		--compile "$(ICON_BUILD_DIR)" \
+		--platform macosx \
+		--minimum-deployment-target $(DEPLOYMENT_TARGET) \
+		--app-icon "$(ICON_NAME)" \
+		--output-partial-info-plist "$(ICON_BUILD_DIR)/partial-info.plist" \
+		--warnings --errors \
+		"$(ICON_SOURCE)" > /dev/null; \
+	for out in Assets.car "$(ICON_NAME).icns"; do \
+		[ -f "$(ICON_BUILD_DIR)/$$out" ] || { echo "error: actool did not produce $$out" >&2; exit 1; }; \
+		cp "$(ICON_BUILD_DIR)/$$out" "$(APP_CONTENTS)/Resources/$$out"; \
+	done
+
 app: build
-	@rm -rf "$(PKG_ROOT)" "$(ICONSET)"
-	@mkdir -p "$(APP_CONTENTS)/MacOS" "$(APP_CONTENTS)/Resources" "$(ICONSET)"
+	@rm -rf "$(PKG_ROOT)"
+	@mkdir -p "$(APP_CONTENTS)/MacOS" "$(APP_CONTENTS)/Resources"
 	@cp "$(SWIFT_BUILD_DIR)/ManagedNotificationsDialogApp" "$(APP_CONTENTS)/MacOS/$(GUI_BINARY_NAME)"
 	@chmod 755 "$(APP_CONTENTS)/MacOS/"*
 	@for bin in "$(APP_CONTENTS)/MacOS/"*; do \
@@ -58,14 +94,7 @@ app: build
 	@sed -e 's/{{MARKETING_VERSION}}/$(MARKETING_VERSION)/g' \
 	     -e 's/{{BUILD_NUMBER}}/$(BUILD_NUMBER)/g' \
 	     packaging/resources/Info.plist.template > "$(APP_CONTENTS)/Info.plist"
-	@for png in "$(ICON_SOURCE)"/swiftDialog-macOS-Default-*.png; do \
-		size=$$(basename "$$png" | sed -E 's/.*-([0-9]+x[0-9]+)@([12])x\.png/\1 \2/'); \
-		set -- $$size; \
-		if [ "$$2" = "2" ]; then name="icon_$$1@2x.png"; else name="icon_$$1.png"; fi; \
-		[ "$$1" = "1024x1024" ] && name="icon_512x512@2x.png"; \
-		cp "$$png" "$(ICONSET)/$$name"; \
-	done
-	@iconutil -c icns "$(ICONSET)" -o "$(APP_CONTENTS)/Resources/ManagedNotificationsDialog.icns"
+	@$(MAKE) --no-print-directory icon
 ifneq ($(SIGNING_IDENTITY_APP),)
 	@codesign --force --sign "$(SIGNING_IDENTITY_APP)" --options runtime --timestamp \
 		--identifier $(APP_IDENTIFIER) "$(PKG_ROOT)/$(APP_BUNDLE_PATH)"

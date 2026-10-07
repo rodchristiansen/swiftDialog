@@ -12,6 +12,8 @@
     <string>Managed Notifications Dialog</string>
     <key>CFBundleIconFile</key>
     <string>ManagedNotificationsDialog</string>
+    <key>CFBundleIconName</key>
+    <string>ManagedNotificationsDialog</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -11,9 +11,28 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+      # Every macOS job builds with Xcode 27, which the app icons need: an older
+      # actool drops their light and dark appearances. The xcode-27 image ships
+      # it; stop here if it is gone rather than build with another Xcode.
+      - name: Select Xcode 27
+        working-directory: .
+        run: |
+          set -euo pipefail
+          XCODE=/Applications/Xcode_27.app
+          if [ ! -d "$XCODE" ]; then
+            XCODE=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1 || true)
+          fi
+          if [ -z "$XCODE" ] || [ ! -d "$XCODE" ]; then
+            echo "::error::Xcode 27 is not installed on this runner. Installed: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --show-sdk-version
 
       - name: Version from tag
         id: ver
@@ -46,8 +65,6 @@ jobs:
         working-directory: ManagedNotificationsDialog
         run: |
           set -euo pipefail
-          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
-          if [ -n "$XCODE" ]; then export DEVELOPER_DIR="$XCODE/Contents/Developer"; fi
           make app VERSION="$VERSION"
           test -x "build/pkg-root/Applications/Utilities/Managed Notifications Dialog.app/Contents/MacOS/ManagedNotificationsDialog"
 
