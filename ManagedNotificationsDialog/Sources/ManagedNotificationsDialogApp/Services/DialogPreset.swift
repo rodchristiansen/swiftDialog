@@ -15,8 +15,15 @@ enum DialogConstants {
     static let authorisationKeyNames = ["AuthorisationKey", "AuthorizationKey", "AuthKey", "Key"]
     static let commandPath = "/usr/local/bin/dialog"
     static let appPath = "/Library/Application Support/Dialog/Dialog.app"
+    /// Where dialog logs when it runs as root. Only root writes here.
     static let sharedLogsDirectory = "/Library/Managed Notifications/logs"
-    static var userLogPath: String { NSHomeDirectory() + "/Library/Logs/dialog.log" }
+    /// Where dialog logs when it runs as a user, relative to that user's home.
+    static let userLogsSubpath = "Library/Logs/Managed Notifications"
+    static func userLogsDirectory(home: String = NSHomeDirectory()) -> String {
+        (home as NSString).appendingPathComponent(userLogsSubpath)
+    }
+    /// The flat per-user log builds before the split wrote; still listed while it exists.
+    static var legacyUserLogPath: String { NSHomeDirectory() + "/Library/Logs/dialog.log" }
 }
 
 enum DialogPreset: String, CaseIterable, Identifiable, Sendable {

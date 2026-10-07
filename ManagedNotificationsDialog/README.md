@@ -14,9 +14,10 @@ unchanged.
   streams what `dialog` prints. When the Mac requires the authorisation key,
   the window asks for it and passes it to that one run through
   `DIALOG_AUTH_KEY`, never on the command line, and does not keep it.
-- **Logs** lists dialog's daily logs under
-  `/Library/Managed Notifications/logs/<date>/dialog.log`, and the signed-in
-  user's fallback `~/Library/Logs/dialog.log`.
+- **Logs** lists dialog's daily logs as root, under
+  `/Library/Managed Notifications/logs/<date>/dialog.log`, and as the signed-in
+  user, under `~/Library/Logs/Managed Notifications/<date>/dialog.log`, each
+  under its own heading.
 
 The window runs `dialog` as the signed-in user, which is how dialog always runs
 its windows, so nothing privileged is installed for it.

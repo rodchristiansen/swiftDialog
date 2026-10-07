@@ -111,8 +111,8 @@ struct SettingsView: View {
     @ViewBuilder
     private var loggingSection: some View {
         card("Logging", systemImage: "doc.text") {
-            infoRow("Shared log", DialogConstants.sharedLogsDirectory + "/<date>/dialog.log")
-            infoRow("Fallback", "~/Library/Logs/dialog.log")
+            infoRow("Root log", DialogConstants.sharedLogsDirectory + "/<date>/dialog.log")
+            infoRow("User log", "~/" + DialogConstants.userLogsSubpath + "/<date>/dialog.log")
             Text("Debug lines reach the log only when dialog runs with --verbose or --debug.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

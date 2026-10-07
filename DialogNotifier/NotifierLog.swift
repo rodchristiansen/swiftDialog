@@ -48,36 +48,44 @@ extension OSLogType {
 // MARK: - Managed log file
 //
 // Beside the unified log, every record is appended to a file in the
-// management-tool logging convention so fleet tooling can collect it:
-// "/Library/Managed Notifications/logs/<yyyy-MM-dd>/dialog.log" whenever that shared
-// directory is writable by this process. The installer creates it root:wheel
-// mode 1777 (world-writable, sticky) so root and user contexts append to the
-// same file, and a root-context run creates it that way if it is missing.
-// When the directory is absent or not writable, or the file cannot be opened,
-// records go to "~/Library/Logs/dialog.log" instead. Lines are
-// "[yyyy-MM-dd HH:mm:ss] LEVEL  message"; the file rolls at 5 MB with five
-// generations kept, rotated only by the file's owner or root. The file is
-// opened with O_NOFOLLOW and must be a single-linked regular file, so a
-// planted symlink or hard link in the shared directory is never written
-// through; files are created mode 0666. Debug records reach the file only in
-// verbose or debug mode, matching what reaches stderr. A write that fails is
-// ignored.
+// management-tool logging convention so fleet tooling can collect it. Logs are
+// split by context, and nothing either context writes is writable by another
+// account:
+//
+// - A root process writes "/Library/Managed Notifications/logs/<yyyy-MM-dd>/dialog.log".
+//   That folder is root's alone: root:wheel 0755, files 0644. It is opened one
+//   component at a time without following a symlink, and every folder above
+//   "Managed Notifications" must be root-owned and writable by no group or
+//   other, or root refuses it and logs in its own home instead. Once per root
+//   process, anything an earlier world-writable (1777/0666) layout left inside
+//   it is reset to root's, and a symlink or hard link there is removed.
+// - Any other process (dialog launched as the signed-in user, which is how the
+//   dialog command shows it) writes "~/Library/Logs/Managed Notifications/<yyyy-MM-dd>/dialog.log"
+//   in its own home, in the same layout, and never touches the root folder.
+//
+// Lines are "[yyyy-MM-dd HH:mm:ss] LEVEL  message", with events.jsonl beside
+// them; the file rolls at 5 MB with five generations kept. The file is opened
+// with O_NOFOLLOW and must be a single-linked regular file. Debug records reach
+// the file only in verbose or debug mode, matching what reaches stderr. A write
+// that fails is ignored.
 
 private let managedLogQueue = DispatchQueue(label: "au.csiro.dialog.notifier.managedlog")
 private let managedLogMaxBytes: off_t = 5 * 1024 * 1024
 private let managedLogGenerations = 5
-private let managedLogSharedDirectory = "/Library/Managed Notifications/logs"
+let managedLogRootDirectory = "/Library/Managed Notifications/logs"
+/// Trailing components of `managedLogRootDirectory` this tool owns and locks:
+/// "Managed Notifications" and "logs". Everything above must already be root-only.
+let managedLogOwnedComponents = 2
+let managedLogUserSubpath = "Library/Logs/Managed Notifications"
 /// The day directory is this tool's session: a dialog is shown far too often to
 /// justify a directory per invocation, so records land in
-/// <shared>/<yyyy-MM-dd>/dialog.log with events.jsonl beside them.
+/// <log root>/<yyyy-MM-dd>/dialog.log with events.jsonl beside them.
 private let managedLogEventsFileName = "events.jsonl"
 private let managedLogRetentionDays = 30
 private let managedLogInvocation = UUID().uuidString
-private var managedLogPruned = false // only touched on managedLogQueue
-private let managedLogUserPath = NSHomeDirectory() + "/Library/Logs/dialog.log"
-private let managedLogSharedDirectoryMode: mode_t = 0o1777
-private let managedLogFileMode: mode_t = 0o666
-private var managedLogFellBack = false // only touched on managedLogQueue
+private var managedLogPruned: Set<String> = [] // only touched on managedLogQueue
+let managedLogDirectoryMode: mode_t = 0o755
+let managedLogFileMode: mode_t = 0o644
 
 private let managedLogStamp: DateFormatter = {
     let formatter = DateFormatter()
@@ -99,11 +107,144 @@ private let managedLogEventStamp: ISO8601DateFormatter = {
     return formatter
 }()
 
-/// The log for `date`, day-nested inside the shared root. Resolved per record so
-/// a dialog left open across midnight rolls onto the new day directory.
-private func managedLogSharedPath(_ date: Date) -> String {
-    return managedLogSharedDirectory + "/" + managedLogDayStamp.string(from: date) + "/dialog.log"
+// MARK: Locations
+
+/// The per-user log root under `home`: ~/Library/Logs/Managed Notifications.
+func managedLogUserDirectory(home: String = NSHomeDirectory()) -> String {
+    return (home as NSString).appendingPathComponent(managedLogUserSubpath)
 }
+
+/// Where this process logs. Root logs under the root folder once it is locked;
+/// every other context, and root when the root folder cannot be trusted, logs
+/// under its own home.
+func managedLogBaseDirectory(isRoot: Bool, rootReady: Bool, userDirectory: String) -> String {
+    return isRoot && rootReady ? managedLogRootDirectory : userDirectory
+}
+
+/// True when `path` is the root log folder or inside it.
+func managedLogIsInsideRootDirectory(_ path: String, root: String = managedLogRootDirectory) -> Bool {
+    return path == root || path.hasPrefix(root + "/")
+}
+
+/// The log for `date`, day-nested inside `base`. Resolved per record so a
+/// dialog left open across midnight rolls onto the new day directory.
+func managedLogPath(base: String, date: Date) -> String {
+    return base + "/" + managedLogDayStamp.string(from: date) + "/dialog.log"
+}
+
+private func managedLogIsRoot() -> Bool {
+    return geteuid() == 0
+}
+
+/// Prepared once per root process; never evaluated in another context.
+private let managedLogRootReady: Bool = {
+    guard managedLogIsRoot() else { return false }
+    return prepareManagedLogRoot()
+}()
+
+private func managedLogCurrentBase() -> String {
+    let isRoot = managedLogIsRoot()
+    return managedLogBaseDirectory(isRoot: isRoot, rootReady: isRoot && managedLogRootReady,
+                                   userDirectory: managedLogUserDirectory())
+}
+
+// MARK: Locking the root folder
+
+/// Root only. Locks the root log folder and resets anything a world-writable
+/// layout left inside it, then reports whether root may log there.
+@discardableResult
+func prepareManagedLogRoot(_ path: String = managedLogRootDirectory,
+                           ownedComponents: Int = managedLogOwnedComponents,
+                           trustedOwners: Set<uid_t> = [0],
+                           owner: uid_t = 0, group: gid_t = 0) -> Bool {
+    let descriptor = openLockedManagedLogDirectory(path, ownedComponents: ownedComponents,
+                                                   trustedOwners: trustedOwners, owner: owner, group: group)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+    lockManagedLogTree(descriptor, depth: 2, owner: owner, group: group)
+    return true
+}
+
+/// Opens `path` one component at a time from "/", never following a symlink.
+/// Folders above the last `ownedComponents` must be owned by a trusted owner and
+/// writable by no group or other. The owned folders are created when missing
+/// and set to `owner`:`group` mode 0755. Returns the final folder's descriptor,
+/// or -1 when any component is a symlink, not a folder, or not trusted.
+func openLockedManagedLogDirectory(_ path: String, ownedComponents: Int,
+                                   trustedOwners: Set<uid_t> = [0],
+                                   owner: uid_t = 0, group: gid_t = 0) -> Int32 {
+    guard path.hasPrefix("/") else { return -1 }
+    let components = path.split(separator: "/").map(String.init)
+    guard !components.contains(".."), !components.contains("."), ownedComponents <= components.count else { return -1 }
+    var current = open("/", O_RDONLY | O_DIRECTORY)
+    guard current >= 0 else { return -1 }
+
+    func isLocked(_ descriptor: Int32) -> Bool {
+        var info = stat()
+        return fstat(descriptor, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
+            && trustedOwners.contains(info.st_uid) && info.st_mode & (S_IWGRP | S_IWOTH) == 0
+    }
+
+    guard isLocked(current) else { close(current); return -1 }
+    for (index, component) in components.enumerated() {
+        let owned = index >= components.count - ownedComponents
+        if owned {
+            _ = mkdirat(current, component, managedLogDirectoryMode)
+        }
+        // O_NOFOLLOW makes a symlink fail here rather than be walked through.
+        let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        close(current)
+        guard next >= 0 else { return -1 }
+        current = next
+        if owned {
+            guard fchown(current, owner, group) == 0, fchmod(current, managedLogDirectoryMode) == 0 else {
+                close(current)
+                return -1
+            }
+        }
+        guard isLocked(current) else { close(current); return -1 }
+    }
+    return current
+}
+
+/// Resets everything under the folder open at `directory` to root's: folders
+/// `owner`:`group` 0755, files 0644. A folder is locked before its entries are
+/// read, so no other account can add or swap an entry while the walk runs. A
+/// symlink, a hard-linked file (which could share its inode with a file
+/// elsewhere), or anything that is neither file nor folder is unlinked, never
+/// followed or re-moded. Folders deeper than `depth` are left as they are.
+func lockManagedLogTree(_ directory: Int32, depth: Int, owner: uid_t = 0, group: gid_t = 0) {
+    for name in managedLogEntryNames(directory) {
+        var info = stat()
+        guard fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+        switch info.st_mode & S_IFMT {
+        case S_IFDIR:
+            guard depth > 0 else { continue }
+            let child = openat(directory, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            guard child >= 0 else { continue }
+            if fchown(child, owner, group) == 0, fchmod(child, managedLogDirectoryMode) == 0 {
+                lockManagedLogTree(child, depth: depth - 1, owner: owner, group: group)
+            }
+            close(child)
+        case S_IFREG:
+            let file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard file >= 0 else { continue }
+            var opened = stat()
+            if fstat(file, &opened) == 0, (opened.st_mode & S_IFMT) == S_IFREG, opened.st_nlink == 1 {
+                _ = fchown(file, owner, group)
+                _ = fchmod(file, managedLogFileMode)
+                close(file)
+            } else {
+                close(file)
+                unlinkat(directory, name, 0)
+            }
+        default:
+            unlinkat(directory, name, 0)
+        }
+    }
+}
+
+// MARK: Day directories and retention
 
 /// True when `path` is a real directory, not a symlink, owned by root or by
 /// this process.
@@ -113,21 +254,18 @@ func managedLogDirectoryIsTrusted(_ path: String) -> Bool {
     return info.st_uid == 0 || info.st_uid == geteuid()
 }
 
-/// Creates a day directory inside the shared root world-writable and sticky like
-/// the root itself, by whichever context gets there first, so every context can
-/// write its own records into it. An existing entry is never followed or
-/// re-moded; it is used only when it is a trusted directory. Root sets aside
-/// anything else under the day's name and makes its own, so root records stay
-/// in the collected location.
+/// Creates a day directory, mode 0755, inside a log root. An existing entry is
+/// never followed or re-moded; it is used only when it is a trusted directory.
+/// Root sets aside anything else under the day's name and makes its own, so
+/// root records stay in the collected location.
 func ensureManagedLogDayDirectory(_ path: String) -> Bool {
     var info = stat()
     if lstat(path, &info) == 0 {
         if managedLogDirectoryIsTrusted(path) { return true }
         guard managedLogIsRoot(), setAsideManagedLogEntry(path) else { return false }
     }
-    guard mkdir(path, managedLogSharedDirectoryMode) == 0 else { return false }
-    // The sticky root stops other accounts renaming what this process just made.
-    chmod(path, managedLogSharedDirectoryMode)
+    guard mkdir(path, managedLogDirectoryMode) == 0 else { return false }
+    chmod(path, managedLogDirectoryMode)
     if managedLogIsRoot() { chown(path, 0, 0) }
     return true
 }
@@ -196,16 +334,16 @@ private func removeManagedLogEntry(_ name: String, in parent: Int32) {
     unlinkat(parent, name, AT_REMOVEDIR)
 }
 
-/// Removes day directories past the retention window, once per process.
-private func pruneManagedLogDays(now: Date = Date()) {
-    guard !managedLogPruned else { return }
-    managedLogPruned = true
-    pruneManagedLogEntries(in: managedLogSharedDirectory, now: now)
+/// Removes day directories under `base` past the retention window, once per
+/// process and log root.
+private func pruneManagedLogDays(in base: String, now: Date = Date()) {
+    guard !managedLogPruned.contains(base) else { return }
+    managedLogPruned.insert(base)
+    pruneManagedLogEntries(in: base, now: now)
 }
 
 /// Removes day directories, and entries set aside by root, past the retention
-/// window. Best-effort: another context's directory is not this process's to
-/// remove.
+/// window. Best-effort: a directory this process does not own is left alone.
 func pruneManagedLogEntries(in directory: String, now: Date) {
     guard let cutoff = Calendar.current.date(byAdding: .day, value: -managedLogRetentionDays, to: now) else { return }
     let root = open(directory, O_RDONLY | O_DIRECTORY)
@@ -222,6 +360,8 @@ func pruneManagedLogEntries(in directory: String, now: Date) {
     }
 }
 
+// MARK: Writing
+
 /// One events.jsonl record: the same entry, structured. Several tools share a
 /// day directory, so each record names its tool, process and invocation.
 private func managedLogEvent(_ message: String, level: String, date: Date) -> String {
@@ -237,40 +377,6 @@ private func managedLogEvent(_ message: String, level: String, date: Date) -> St
     guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
           let line = String(data: data, encoding: .utf8) else { return "" }
     return line + "\n"
-}
-
-private func managedLogIsRoot() -> Bool {
-    return geteuid() == 0
-}
-
-/// Creates the shared directory root:wheel mode 1777 when missing, and
-/// restores that mode if it drifted on a root-owned directory. Root only; a
-/// no-op otherwise.
-private func ensureManagedLogSharedDirectory() {
-    guard managedLogIsRoot() else { return }
-    var info = stat()
-    if lstat(managedLogSharedDirectory, &info) == 0 {
-        if (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == 0,
-           (info.st_mode & 0o7777) != managedLogSharedDirectoryMode {
-            chmod(managedLogSharedDirectory, managedLogSharedDirectoryMode)
-        }
-        return
-    }
-    let parent = (managedLogSharedDirectory as NSString).deletingLastPathComponent
-    try? FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true,
-                                             attributes: [.posixPermissions: 0o755])
-    if mkdir(managedLogSharedDirectory, managedLogSharedDirectoryMode) == 0 {
-        chown(managedLogSharedDirectory, 0, 0)
-        chmod(managedLogSharedDirectory, managedLogSharedDirectoryMode)
-    }
-}
-
-private func managedLogSharedDirectoryIsWritable() -> Bool {
-    ensureManagedLogSharedDirectory()
-    var info = stat()
-    guard lstat(managedLogSharedDirectory, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
-          info.st_uid == 0 else { return false }
-    return access(managedLogSharedDirectory, W_OK | X_OK) == 0
 }
 
 private func managedLogLevel(_ type: OSLogType) -> String {
@@ -291,8 +397,8 @@ func writeManagedLog(_ message: String, logLevel: OSLogType) {
 }
 
 /// Opens `path` for appending without following a symlink, refuses anything
-/// that is not a regular file with one link, and widens a file this process
-/// owns to mode 0666 so other contexts can append too.
+/// that is not a regular file with one link, and sets a file this process owns
+/// to mode 0644.
 private func openManagedLog(_ path: String) -> Int32? {
     let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, managedLogFileMode)
     guard descriptor >= 0 else { return nil }
@@ -322,15 +428,19 @@ private func rollManagedLog(_ path: String, _ descriptor: Int32) -> Bool {
     return true
 }
 
+/// Appends `record` to `path`, a file in a day directory under a log root. The
+/// root log folder is written only by root, and only once it is locked.
 private func appendManagedLog(_ record: String, to path: String) -> Bool {
     let directory = (path as NSString).deletingLastPathComponent
-    if (directory as NSString).deletingLastPathComponent == managedLogSharedDirectory {
-        guard ensureManagedLogDayDirectory(directory) else { return false }
-        pruneManagedLogDays()
-    } else if directory != managedLogSharedDirectory, !FileManager.default.fileExists(atPath: directory) {
-        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o755])
+    let base = (directory as NSString).deletingLastPathComponent
+    if managedLogIsInsideRootDirectory(base) {
+        guard managedLogIsRoot(), managedLogRootReady, base == managedLogRootDirectory else { return false }
+    } else if !FileManager.default.fileExists(atPath: base) {
+        try? FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: managedLogDirectoryMode])
     }
+    guard ensureManagedLogDayDirectory(directory) else { return false }
+    pruneManagedLogDays(in: base)
     guard var descriptor = openManagedLog(path) else { return false }
     if rollManagedLog(path, descriptor) {
         close(descriptor)
@@ -352,14 +462,15 @@ private func appendManagedLog(_ record: String, to path: String) -> Bool {
 }
 
 private func appendManagedLog(_ record: String, event: String, date: Date) {
-    if !managedLogFellBack, managedLogSharedDirectoryIsWritable() {
-        let path = managedLogSharedPath(date)
+    var bases = [managedLogCurrentBase()]
+    let own = managedLogUserDirectory()
+    if bases[0] != own { bases.append(own) }
+    for base in bases {
+        let path = managedLogPath(base: base, date: date)
         if appendManagedLog(record, to: path) {
             let events = (path as NSString).deletingLastPathComponent + "/" + managedLogEventsFileName
             if !event.isEmpty { _ = appendManagedLog(event, to: events) }
             return
         }
     }
-    managedLogFellBack = true
-    _ = appendManagedLog(record, to: managedLogUserPath)
 }
