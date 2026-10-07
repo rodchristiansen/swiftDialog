@@ -1,8 +1,10 @@
 # Managed Notifications Dialog
 
 A Prefs / Run / Logs window for swiftDialog, installed as
-`/Applications/Utilities/Managed Notifications Dialog.app`. It leaves `dialog`,
-`Dialog.app` and their install paths unchanged.
+`/Applications/Utilities/Managed Notifications Dialog.app`. It ships inside the
+SwiftDialog package alongside `Dialog.app`, so every Mac that gets dialog gets
+the window, and it leaves `dialog`, `Dialog.app` and their install paths
+unchanged.
 
 - **Prefs** shows whether an authorisation key is set for `au.csiro.dialog` and
   whether a configuration profile manages it, plus the installed `dialog` and
@@ -17,7 +19,7 @@ A Prefs / Run / Logs window for swiftDialog, installed as
   user's fallback `~/Library/Logs/dialog.log`.
 
 The window runs `dialog` as the signed-in user, which is how dialog always runs
-its windows, so the package installs no privileged helper.
+its windows, so nothing privileged is installed for it.
 
 Build and test:
 
@@ -26,8 +28,8 @@ swift test
 ```
 
 ```
-make pkg
+make app
 ```
 
-Set `SIGNING_IDENTITY_APP` and `SIGNING_IDENTITY_PKG` to sign the app and the
-package, and `NOTARIZATION_PROFILE` for `make notarize`.
+`make app` leaves the bundle in `build/pkg-root`, where the release workflow
+picks it up. Set `SIGNING_IDENTITY_APP` to sign it.

@@ -38,6 +38,19 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" | grep -qx "$build_number"
 
+      # The Prefs / Run / Logs window ships inside the same package as dialog,
+      # so every Mac that gets dialog gets the window with nothing else to deploy.
+      - name: Build Managed Notifications Dialog.app (unsigned)
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        working-directory: ManagedNotificationsDialog
+        run: |
+          set -euo pipefail
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE" ]; then export DEVELOPER_DIR="$XCODE/Contents/Developer"; fi
+          make app VERSION="$VERSION"
+          test -x "build/pkg-root/Applications/Utilities/Managed Notifications Dialog.app/Contents/MacOS/ManagedNotificationsDialog"
+
       - name: Build unsigned package
         env:
           VERSION: ${{ steps.ver.outputs.VERSION }}
@@ -45,8 +58,21 @@ jobs:
           set -euo pipefail
           root="$PWD/pkg/root"; scripts="$PWD/pkg/scripts"
           rm -rf "$PWD/pkg" artifacts
-          mkdir -p "$root/Library/Application Support/Dialog" "$scripts" artifacts
+          mkdir -p "$root/Library/Application Support/Dialog" "$root/Applications/Utilities" "$scripts" artifacts
           cp -R build/Build/Products/Release/Dialog.app "$root/Library/Application Support/Dialog/Dialog.app"
+          cp -R "ManagedNotificationsDialog/build/pkg-root/Applications/Utilities/Managed Notifications Dialog.app" \
+            "$root/Applications/Utilities/Managed Notifications Dialog.app"
+          cat > "$scripts/preinstall" <<'PRE'
+          #!/bin/bash
+          # Managed Notifications Dialog.app is built for macOS 14 or later.
+          minimum=14
+          current=$(/usr/bin/sw_vers -productVersion)
+          if [ "${current%%.*}" -lt "$minimum" ]; then
+            echo "This package requires macOS ${minimum} or later; this Mac runs ${current}." >&2
+            exit 1
+          fi
+          exit 0
+          PRE
           cat > "$scripts/postinstall" <<'POST'
           #!/bin/bash
           mkdir -p /usr/local/bin
@@ -55,9 +81,15 @@ jobs:
           /usr/bin/install -d -m 1777 -o root -g wheel "$logs"
           /bin/chmod 1777 "$logs"
           /bin/chmod 666 "$logs"/dialog.log* 2>/dev/null || true
+          gui="${3%/}/Applications/Utilities/Managed Notifications Dialog.app"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "$gui" 2>/dev/null || true
+          # The window used to ship in its own package. This package now owns the
+          # app, so drop that receipt rather than leave two packages claiming it.
+          /usr/sbin/pkgutil --pkg-info au.csiro.dialog.gui >/dev/null 2>&1 && \
+            /usr/sbin/pkgutil --forget au.csiro.dialog.gui >/dev/null 2>&1
           exit 0
           POST
-          chmod 755 "$scripts/postinstall"
+          chmod 755 "$scripts/preinstall" "$scripts/postinstall"
           # Install the app even over a newer bundle, so a rollback also lands.
           pkgbuild --analyze --root "$root" "$PWD/pkg/component.plist"
           i=0
@@ -74,18 +106,6 @@ jobs:
           rm -f artifacts/SwiftDialog-component.pkg
           shasum -a 256 "artifacts/SwiftDialog-${VERSION}.pkg" > "artifacts/SwiftDialog-${VERSION}.pkg.sha256"
 
-      - name: Build Managed Notifications Dialog package (unsigned)
-        env:
-          VERSION: ${{ steps.ver.outputs.VERSION }}
-        working-directory: ManagedNotificationsDialog
-        run: |
-          set -euo pipefail
-          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
-          if [ -n "$XCODE" ]; then export DEVELOPER_DIR="$XCODE/Contents/Developer"; fi
-          make pkg VERSION="$VERSION"
-          cp "build/ManagedNotificationsDialog-${VERSION}.pkg" ../artifacts/
-          (cd ../artifacts && shasum -a 256 "ManagedNotificationsDialog-${VERSION}.pkg" > "ManagedNotificationsDialog-${VERSION}.pkg.sha256")
-
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -94,5 +114,3 @@ jobs:
           files: |
             artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg
             artifacts/SwiftDialog-${{ steps.ver.outputs.VERSION }}.pkg.sha256
-            artifacts/ManagedNotificationsDialog-${{ steps.ver.outputs.VERSION }}.pkg
-            artifacts/ManagedNotificationsDialog-${{ steps.ver.outputs.VERSION }}.pkg.sha256

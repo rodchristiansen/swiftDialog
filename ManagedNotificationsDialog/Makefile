@@ -1,10 +1,11 @@
 #!/usr/bin/make -f
 #
 # Managed Notifications Dialog build
-# Builds the app bundle and an installer package. With SIGNING_IDENTITY_APP and
-# SIGNING_IDENTITY_PKG set it signs both; without them it builds unsigned, as the
-# public release does. The app runs the installed `dialog` as the signed-in
-# user, so there is no privileged helper to install.
+# Builds the app bundle. It ships inside the SwiftDialog package, which the
+# release workflow assembles, so there is no package of its own. With
+# SIGNING_IDENTITY_APP set it signs the bundle; without it the bundle is left
+# unsigned, as the public release does. The app runs the installed `dialog` as
+# the signed-in user, so there is no privileged helper to install.
 #
 
 -include .env
@@ -27,12 +28,9 @@ SWIFT_BUILD_DIR = $(shell swift build -c release --arch arm64 --arch x86_64 --sh
 ICON_SOURCE = ../dialog/Assets.xcassets/AppIcon.appiconset
 ICONSET = $(BUILD_DIR)/ManagedNotificationsDialog.iconset
 
-PKG_ID = au.csiro.dialog.gui
-PKG_OUTPUT = $(BUILD_DIR)/ManagedNotificationsDialog-$(VERSION).pkg
+.PHONY: all build test app verify clean
 
-.PHONY: all build test app pkg notarize verify clean
-
-all: pkg
+all: app
 
 # Record the SDK the binaries are linked against. Some toolchains write the
 # deployment target as the SDK version, and AppKit then keeps the pre-macOS 26
@@ -76,36 +74,7 @@ else
 	@echo "SIGNING_IDENTITY_APP not set: app bundle left unsigned"
 endif
 
-pkg: app
-	@pkgbuild --analyze --root "$(PKG_ROOT)" "$(BUILD_DIR)/component.plist"
-	@/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$(BUILD_DIR)/component.plist" 2>/dev/null \
-		|| /usr/libexec/PlistBuddy -c "Add :0:BundleIsRelocatable bool false" "$(BUILD_DIR)/component.plist"
-	@/usr/libexec/PlistBuddy -c "Set :0:BundleIsVersionChecked false" "$(BUILD_DIR)/component.plist"
-	@pkgbuild --root "$(PKG_ROOT)" --component-plist "$(BUILD_DIR)/component.plist" \
-		--identifier $(PKG_ID) --version $(VERSION) --scripts packaging/scripts \
-		"$(BUILD_DIR)/component.pkg"
-ifneq ($(SIGNING_IDENTITY_PKG),)
-	@productbuild --package "$(BUILD_DIR)/component.pkg" --identifier $(PKG_ID) --version $(VERSION) \
-		--sign "$(SIGNING_IDENTITY_PKG)" --timestamp "$(PKG_OUTPUT)"
-else
-	@productbuild --package "$(BUILD_DIR)/component.pkg" --identifier $(PKG_ID) --version $(VERSION) "$(PKG_OUTPUT)"
-endif
-	@rm -f "$(BUILD_DIR)/component.pkg"
-	@echo "Built $(PKG_OUTPUT)"
-
-# Notarize and staple the signed package. Needs a notarytool keychain profile
-# in NOTARIZATION_PROFILE.
-notarize: pkg
-ifeq ($(NOTARIZATION_PROFILE),)
-	@echo "NOTARIZATION_PROFILE not set: cannot notarize" && exit 1
-endif
-	@xcrun notarytool submit "$(PKG_OUTPUT)" --keychain-profile "$(NOTARIZATION_PROFILE)" --wait
-	@xcrun stapler staple "$(PKG_OUTPUT)"
-	@echo "Notarized and stapled $(PKG_OUTPUT)"
-
 verify:
-	@pkgutil --check-signature "$(PKG_OUTPUT)"
-	@spctl --assess --type install --verbose "$(PKG_OUTPUT)"
 	@codesign --verify --strict --verbose=2 "$(PKG_ROOT)/$(APP_BUNDLE_PATH)"
 
 clean:
