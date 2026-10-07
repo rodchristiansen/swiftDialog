@@ -19,10 +19,12 @@ struct LogView: View {
     var body: some View {
         HSplitView {
             sessionList
-                .frame(minWidth: 180, idealWidth: 240, maxWidth: 300)
+                .frame(minWidth: 180, idealWidth: 240, maxWidth: 300, maxHeight: .infinity)
 
             logDetailView
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { refresh() }
     }
 
@@ -68,6 +70,16 @@ struct LogView: View {
                 .tag(session)
             }
             .listStyle(.sidebar)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                if sessions.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Logs Yet", systemImage: "doc.text.magnifyingglass")
+                    } description: {
+                        Text("Logs are written to \(logDirectory).")
+                    }
+                }
+            }
         }
         .onChange(of: selected) { _, newValue in
             if let session = newValue {
@@ -116,6 +128,12 @@ struct LogView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .background(.black.opacity(0.85))
+            } else if sessions.isEmpty {
+                ContentUnavailableView(
+                    "No Logs",
+                    systemImage: "doc.text",
+                    description: Text("There are no logs yet. They appear here after the first run.")
+                )
             } else {
                 ContentUnavailableView(
                     "No Log Selected",
