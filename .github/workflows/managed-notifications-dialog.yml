@@ -19,17 +19,13 @@ jobs:
         working-directory: ManagedNotificationsDialog
     steps:
       - uses: actions/checkout@v4
-      - name: Test and build unsigned package
+      - name: Test and build the app
         run: |
           set -euo pipefail
           # Link against a macOS 26 SDK so the window gets the macOS 26
           # toolbar tabs rather than the older title bar.
-          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "$XCODE" ]; then export DEVELOPER_DIR="$XCODE/Contents/Developer"; fi
           xcrun --show-sdk-version
           swift test
-          make pkg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ManagedNotificationsDialog-pkg
-          path: ManagedNotificationsDialog/build/*.pkg
+          make app
