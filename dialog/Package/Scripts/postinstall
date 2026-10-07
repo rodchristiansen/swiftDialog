@@ -54,6 +54,37 @@ if [[ -e "${iconfile}" ]] && [[ -e "${dialogbundle}" ]]; then
     fi
 fi
 
+# dialog's root log folder belongs to root alone: root:wheel 0755, files 0644.
+# dialog run as a user logs to ~/Library/Logs/Managed Notifications instead.
+# A symlink or anything other than a real folder at either level is refused.
+# Earlier builds made the folder world-writable (1777) and its files 0666: each
+# folder level is made root's before anything inside it is read, so nothing
+# can be swapped in mid-walk, then symlinks, hard-linked files and anything
+# else that is not a plain file are removed and the files reset to 0644.
+logs_parent="/Library/Managed Notifications"
+logs="${logs_parent}/logs"
+logs_ok=1
+for dir in "${logs_parent}" "${logs}"; do
+  if [ -L "${dir}" ] || { [ -e "${dir}" ] && [ ! -d "${dir}" ]; }; then
+    echo "Refusing ${dir}: it is not a real folder."
+    logs_ok=0
+    break
+  fi
+  /bin/mkdir -p -m 755 "${dir}"
+  /usr/sbin/chown -h root:wheel "${dir}"
+  /bin/chmod -h 755 "${dir}"
+done
+if [ "${logs_ok}" = 1 ]; then
+  for depth in 1 2; do
+    /usr/bin/find -x "${logs}" -mindepth "${depth}" -maxdepth "${depth}" -type d \
+      -exec /usr/sbin/chown -h root:wheel {} + -exec /bin/chmod -h 755 {} +
+  done
+  /usr/bin/find -x "${logs}" -mindepth 1 -maxdepth 3 \
+    \( -type l -o \( -type f -links +1 \) -o \( ! -type f ! -type d \) \) -delete
+  /usr/bin/find -x "${logs}" -mindepth 1 -maxdepth 3 -type f \
+    -exec /usr/sbin/chown -h root:wheel {} + -exec /bin/chmod -h 644 {} +
+fi
+
 # create /usr/local/bin/dialog symlink
 "${dialogcli}" --link >> "${log_file}"
 

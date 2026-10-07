@@ -140,19 +140,34 @@ private struct FakePreferences: PreferenceSource {
         try write("2026-10-06/dialog.log")
         try write("2026-10-06/dialog.log.1")
         try write("not-a-day/dialog.log")
-        try write("user/dialog.log")
+        try write("user/2026-10-06/dialog.log")
+        try write("user/2026-10-07/dialog.log")
+        try write("legacy/dialog.log")
 
-        let sessions = LogSessionStore.sessions(in: root, userLog: (root as NSString).appendingPathComponent("user/dialog.log"))
+        let legacy = (root as NSString).appendingPathComponent("legacy/dialog.log")
+        let sessions = LogSessionStore.sessions(system: root, user: (root as NSString).appendingPathComponent("user"),
+                                                legacyUserLog: legacy)
         #expect(sessions.map(\.id) == [
-            "2026-10-06/dialog.log",
-            "2026-10-06/dialog.log.1",
-            "2026-10-05/dialog.log",
-            (root as NSString).appendingPathComponent("user/dialog.log")
+            "user:2026-10-07/dialog.log",
+            "system:2026-10-06/dialog.log",
+            "system:2026-10-06/dialog.log.1",
+            "user:2026-10-06/dialog.log",
+            "system:2026-10-05/dialog.log",
+            "user:" + legacy
         ])
-        #expect(sessions.first?.name == "2026-10-06")
+        #expect(sessions.first?.name == "2026-10-07")
+        #expect(sessions.filter { $0.source == .system }.count == 3)
+        #expect(sessions.filter { $0.source == .user }.count == 3)
+        #expect(LogSource.system.label != LogSource.user.label)
     }
 
-    @Test func missingRootListsOnlyTheUserLog() {
-        #expect(LogSessionStore.sessions(in: "/nonexistent-\(UUID().uuidString)").isEmpty)
+    @Test func userLogsLiveUnderTheUsersLibrary() {
+        #expect(DialogConstants.userLogsDirectory(home: "/Users/someone") == "/Users/someone/Library/Logs/Managed Notifications")
+        #expect(DialogConstants.sharedLogsDirectory == "/Library/Managed Notifications/logs")
+    }
+
+    @Test func missingRootsListNothing() {
+        let missing = "/nonexistent-\(UUID().uuidString)"
+        #expect(LogSessionStore.sessions(system: missing, user: missing + "-user").isEmpty)
     }
 }
