@@ -309,8 +309,15 @@ struct DialogLauncher: ParsableCommand {
             return CommandResult(status: 255, stdout: "", stderr: "App path does not exist: \(binary)")
         }
 
-        // Construct the arguments to run the command as the target user
-        var commandArgs = ["asuser", "\(uid)", "sudo", "-H", "-u", user, binary]
+        // Construct the arguments to run the command as the target user.
+        // sudo resets the environment, so an authorisation key given in
+        // DIALOG_AUTH_KEY is carried across by name; its value stays out of
+        // the arguments, which every account can read.
+        var commandArgs = ["asuser", "\(uid)", "sudo", "-H", "-u", user]
+        if ProcessInfo.processInfo.environment["DIALOG_AUTH_KEY"] != nil {
+            commandArgs.append("--preserve-env=DIALOG_AUTH_KEY")
+        }
+        commandArgs.append(binary)
         if !args.isEmpty {
             commandArgs.append(contentsOf: args)
         }
