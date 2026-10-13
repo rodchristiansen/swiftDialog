@@ -38,10 +38,19 @@ struct SettingsView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
+
+                Divider()
+
+                footer
             }
             .padding()
         }
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            // Start with nothing focused so no link draws a focus ring at
+            // launch; Tab still moves focus to the links as usual.
+            DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
+        }
     }
 
     private func refresh() {
@@ -66,15 +75,32 @@ struct SettingsView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-
-            HStack(spacing: 16) {
-                Link("Documentation", destination: URL(string: "https://github.com/rodchristiansen/swiftDialog#readme")!)
-                    .font(.caption)
-                Link("Report Issue", destination: URL(string: "https://github.com/swiftDialog/swiftDialog/issues")!)
-                    .font(.caption)
-            }
         }
         .padding(.top, 8)
+    }
+
+    // MARK: - Footer
+
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let marketing = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "v\(marketing) (\(build))"
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        HStack(spacing: 12) {
+            Text(versionText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Link("Documentation", destination: URL(string: "https://github.com/rodchristiansen/swiftDialog#readme")!)
+                .font(.caption)
+            Link("Report Issue", destination: URL(string: "https://github.com/swiftDialog/swiftDialog/issues")!)
+                .font(.caption)
+            Spacer()
+        }
     }
 
     // MARK: - Sections
