@@ -38,8 +38,6 @@ struct SettingsView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
-
-                servicesSection
             }
             .padding()
         }
@@ -122,18 +120,6 @@ struct SettingsView: View {
             Text("Debug lines reach the log only when dialog runs with --verbose or --debug.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    /// dialog installs no launchd jobs: it runs only when a script, a
-    /// management tool or the Run tab invokes it. The card says so rather
-    /// than leaving the Services section out of the suite's common layout.
-    @ViewBuilder
-    private var servicesSection: some View {
-        card("Services", systemImage: "gearshape.2") {
-            Text("dialog installs no launchd jobs. It runs only when a script, a management tool or the Run tab calls it.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
