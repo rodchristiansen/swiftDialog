@@ -4,7 +4,9 @@
 //
 //  Prefs tab: centred app header, then dialog's machine settings in cards.
 //  dialog's only machine setting is the authorisation key, which a
-//  configuration profile manages, so this tab is read-only.
+//  configuration profile manages, so this tab is read-only. When a profile
+//  sets it, one banner under the header says so, in the manner of System
+//  Settings, instead of a caption on the field.
 //
 
 import SwiftUI
@@ -17,6 +19,10 @@ struct SettingsView: View {
         ScrollView {
             VStack(spacing: 16) {
                 appInfoHeader
+
+                if case .managed = keyState {
+                    ProfileManagedBanner()
+                }
 
                 Divider()
 
@@ -32,6 +38,8 @@ struct SettingsView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
+
+                servicesSection
             }
             .padding()
         }
@@ -82,9 +90,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 switch keyState {
                 case .managed(let name):
-                    Text("Set; dialog shows nothing unless the caller supplies the key.")
-                    Label("Managed (\(name))", systemImage: "lock.fill")
-                        .font(.caption)
+                    Text("Set (\(name)); dialog shows nothing unless the caller supplies the key.")
                         .foregroundStyle(.secondary)
                 case .unmanaged(let name):
                     Text("Set outside a configuration profile (\(name)).")
@@ -119,6 +125,18 @@ struct SettingsView: View {
         }
     }
 
+    /// dialog installs no launchd jobs: it runs only when a script, a
+    /// management tool or the Run tab invokes it. The card says so rather
+    /// than leaving the Services section out of the suite's common layout.
+    @ViewBuilder
+    private var servicesSection: some View {
+        card("Services", systemImage: "gearshape.2") {
+            Text("dialog installs no launchd jobs. It runs only when a script, a management tool or the Run tab calls it.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     // MARK: - Building Blocks
 
     @ViewBuilder
@@ -149,5 +167,18 @@ struct SettingsView: View {
                 .textSelection(.enabled)
                 .foregroundStyle(warn ? .orange : .primary)
         }
+    }
+}
+
+/// One line at the top of Prefs, in the manner of System Settings' "This
+/// setting has been configured by a profile." Shown only when a profile
+/// forces one of dialog's keys.
+struct ProfileManagedBanner: View {
+    var body: some View {
+        Label("Settings shown in gray have been configured by a profile.", systemImage: "lock.fill")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityElement(children: .combine)
     }
 }
